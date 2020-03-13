@@ -24,12 +24,13 @@ import com.android.tools.lint.detector.api.Issue
 import com.android.tools.lint.detector.api.Location
 import com.android.tools.lint.detector.api.Scope
 import com.android.tools.lint.detector.api.Severity
+import java.util.EnumSet
 
 class IncompatibleIidVersionDetector : Detector() {
     companion object Issues {
         private val IMPLEMENTATION = Implementation(
                 IncompatibleIidVersionDetector::class.java,
-                Scope.EMPTY
+                EnumSet.noneOf(Scope::class.java)
         )
 
         @JvmField
