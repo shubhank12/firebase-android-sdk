@@ -14,12 +14,26 @@
 
 package com.google.firebase.gradle.plugins.ci
 
+import com.google.firebase.gradle.plugins.measurement.MetricsReportUploader
+
+import static com.google.firebase.gradle.plugins.measurement.MetricsServiceApi.Metric
+import static com.google.firebase.gradle.plugins.measurement.MetricsServiceApi.Result
+import static com.google.firebase.gradle.plugins.measurement.MetricsServiceApi.Report
+
+import com.google.firebase.gradle.plugins.measurement.TestLogFinder
 import org.gradle.api.Plugin
 import org.gradle.api.Project
 import org.gradle.api.tasks.testing.Test
 import org.gradle.testing.jacoco.tasks.JacocoReport
 
 class CheckCoveragePlugin implements Plugin<Project> {
+    private final XmlSlurper parser
+
+    CheckCoveragePlugin() {
+        this.parser = new XmlSlurper()
+        this.parser.setFeature("http://apache.org/xml/features/disallow-doctype-decl", false)
+        this.parser.setFeature("http://apache.org/xml/features/nonvalidating/load-external-dtd", false)
+    }
 
     @Override
     void apply(Project project) {
@@ -71,95 +85,40 @@ class CheckCoveragePlugin implements Plugin<Project> {
         }
     }
 
+    private def parseCoverageReport(path) {
+        def log = TestLogFinder.generateCurrentLogLink()
+        def report = new Report(Metric.Coverage, [], log)
+
+        def xmlReport = this.parser.parse(path)
+        def sdk = xmlReport.@name.text()
+        def sources = xmlReport.package.sourcefile
+        for (def src : sources) {
+            def coverage = src.counter.find { it.@type == 'LINE' }
+            def covered = Double.parseDouble(coverage.@covered.text())
+            def missed = Double.parseDouble(coverage.@missed.text())
+            def percent = covered / (covered + missed)
+
+            def result = new Result(sdk, )
+        }
+        def lineCoverage = xmlReport.counter.find { it.@type == 'LINE' }
+        def covered = Double.parseDouble(lineCoverage.@covered.text())
+        def missed = Double.parseDouble(lineCoverage.@missed.text())
+        def percent = covered / (covered + missed)
+
+        def result = new Result(name, "line", percent)
+        def log = TestLogFinder.generateCurrentLogLink()
+        def report = new Report(Metric.Coverage, [result], log)
+
+        return report
+    }
+
     private def upload(task) {
-        if (System.getenv().containsKey("FIREBASE_CI")) {
-            def flag = convert(task.project.path)
-            def report = task.reports.xml.destination
-
-            if (System.getenv().containsKey("PROW_JOB_ID")) {
-                task.logger.quiet("Prow CI detected.")
-                uploadFromProwJobs(task.project, report, flag)
-            } else {
-                uploadFromCodecovSupportedEnvironment(task.project, report, flag)
-            }
-        } else {
-            task.logger.quiet("Reports upload is enabled only on CI.")
+        def xmlReportPath = task.reports.xml.destination
+        def report = parseCoverageReport(xmlReportPath)
+        new File(task.project.buildDir, 'coverage.json').withWriter {
+            it.write(report.toJson())
         }
+
+        MetricsReportUploader.upload(task.project, "${task.project.buildDir}/coverage.json")
     }
-
-    private def uploadFromProwJobs(project, report, flag) {
-        // https://github.com/kubernetes/test-infra/blob/master/prow/jobs.md
-        def name = System.getenv("JOB_NAME")
-        def type = System.getenv("JOB_TYPE")
-        def job = System.getenv("PROW_JOB_ID")
-        def build = System.getenv("BUILD_ID")
-        def org = System.getenv("REPO_OWNER")
-        def repo = System.getenv("REPO_NAME")
-        def branch = System.getenv("PULL_BASE_REF")
-        def base = System.getenv("PULL_BASE_SHA")
-        def head = System.getenv("PULL_PULL_SHA")
-        def pr = System.getenv("PULL_NUMBER")
-
-        def commit = head ?: base
-
-        // TODO(yifany): use com.google.firebase.gradle.plugins.measurement.TestLogFinder
-        def domain = "android-ci.firebaseopensource.com"
-        def bucket = "android-ci"
-        def dir = type == "presubmit" ? "pr-logs/pull/${org}_${repo}/${pr}" : "logs"
-        def path = "${name}/${build}"
-        def url = URLEncoder.encode("https://${domain}/view/gcs/${bucket}/${dir}/${path}", "UTF-8")
-
-        project.exec {
-            environment "VCS_COMMIT_ID", "${commit}"
-            environment "VCS_BRANCH_NAME", "${branch}"
-            environment "VCS_PULL_REQUEST", "${pr}"
-            environment "VCS_SLUG", "${org}/${repo}"
-            environment "CI_BUILD_URL", "${url}"
-            environment "CI_BUILD_ID", "${build}"
-            environment "CI_JOB_ID", "${job}"
-
-            commandLine(
-                    "bash",
-                    "-c",
-                    "bash /opt/codecov/uploader.sh -f ${report} -F ${flag}"
-            )
-        }
-    }
-
-    private def uploadFromCodecovSupportedEnvironment(project, report, flag) {
-        project.exec {
-            commandLine(
-                    "bash",
-                    "-c",
-                    "bash <(curl -s https://codecov.io/bash) -f ${report} -F ${flag}"
-            )
-        }
-    }
-
-    /*
-     * Converts a gradle project path to a format complied with Codecov flags.
-     *
-     * It transforms a gradle project name into PascalCase, removes the leading `:` and
-     * replaces all the remaining `:` with `_`.
-     *
-     * For example, a gradle project path
-     *
-     *     `:encoders:firebase-encoders-processor:test-support`
-     *
-     * is converted to
-     *
-     *     `Encoders_FirebaseEncodersProcessor_TestSupport`
-     *
-     * after processing.
-     *
-     * See https://docs.codecov.io/docs/flags#section-flag-creation for details.
-     */
-    private def convert(path) {
-        return path
-                .replaceAll(/([:-])([a-z])/, { "${it[1]}${it[2].toUpperCase()}" })
-                .replaceAll(/^:/, "")
-                .replaceAll(/-/, "")
-                .replaceAll(/:/, "_")
-    }
-
 }
